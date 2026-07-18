@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+  --fenua-violet: #A020F0;
+  --fenua-orange: #FF7F11;
+  --fenua-coral: #FF7F50;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-fenua-violet: var(--fenua-violet);
+  --color-fenua-orange: var(--fenua-orange);
+  --color-fenua-coral: var(--fenua-coral);
+  --font-sans: var(--font-inter);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-inter), sans-serif;
+}
