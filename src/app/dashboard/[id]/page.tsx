@@ -5,6 +5,7 @@ import { TRAVEL_REQUEST_STATUS_LABELS } from "@/lib/status";
 import { getPassportPreviewUrl } from "../actions";
 import { PassportUploadForm } from "./passport-upload-form";
 import { TravelerDetailsForm } from "./traveler-details-form";
+import { QrScanPanel } from "./qr-scan-panel";
 
 export default async function TravelRequestPage({
   params,
@@ -62,7 +63,12 @@ export default async function TravelRequestPage({
         {TRAVEL_REQUEST_STATUS_LABELS[travelRequest.status] ?? travelRequest.status}
       </p>
 
-      {travelRequest.status === "draft" && <PassportUploadForm travelRequestId={travelRequest.id} />}
+      {travelRequest.status === "draft" && (
+        <>
+          <PassportUploadForm travelRequestId={travelRequest.id} />
+          <QrScanPanel travelRequestId={travelRequest.id} />
+        </>
+      )}
 
       {travelRequest.status === "to_verify" && traveler && !traveler.data_validated_by_customer && (
         <>
@@ -72,6 +78,7 @@ export default async function TravelRequestPage({
               La photo n&apos;est pas exploitable ? Remplacez-la
             </summary>
             <PassportUploadForm travelRequestId={travelRequest.id} />
+            <QrScanPanel travelRequestId={travelRequest.id} />
           </details>
         </>
       )}

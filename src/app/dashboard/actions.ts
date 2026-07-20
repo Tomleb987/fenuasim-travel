@@ -1,24 +1,14 @@
 "use server";
 
-import { randomUUID } from "node:crypto";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import QRCode from "qrcode";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
 import { encryptPassportField } from "@/lib/crypto/passport-encryption";
 import { bytesToPgHex } from "@/lib/postgres-bytea";
-import type { Database } from "@/lib/supabase/database.types";
-
-type TravelRequestStatus = Database["public"]["Enums"]["travel_request_status"];
-type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
-
-const MIME_TO_EXTENSION: Record<string, string> = {
-  "image/jpeg": "jpg",
-  "image/png": "png",
-  "image/webp": "webp",
-  "image/heic": "heic",
-};
-const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 Mo, cohérent avec db/storage-setup.sql
+import { generateScanToken, hashScanToken } from "@/lib/crypto/qr-token";
+import { runPassportUploadSequence } from "./passport-upload-sequence";
 
 // app_settings n'a aucune policy de lecture pour un client authentifié
 // (cf. db/schema.sql, section RLS) : ces valeurs sont lues côté serveur via
@@ -35,44 +25,16 @@ async function getEstaPriceCents(): Promise<number> {
   return Number(data.value);
 }
 
-async function getPassportRetentionDays(): Promise<number> {
+async function getQrSessionTtlMinutes(): Promise<number> {
   const service = createServiceClient();
   const { data, error } = await service
     .from("app_settings")
     .select("value")
-    .eq("key", "passport_retention_days")
+    .eq("key", "qr_session_ttl_minutes")
     .single();
 
-  if (error || !data) throw new Error("Impossible de lire la durée de rétention (app_settings)");
+  if (error || !data) throw new Error("Impossible de lire la durée de validité du QR (app_settings)");
   return Number(data.value);
-}
-
-type TimelineEventType = Database["public"]["Enums"]["timeline_event_type"];
-
-async function transitionStatus(
-  supabase: SupabaseServerClient,
-  travelRequestId: string,
-  fromStatus: TravelRequestStatus,
-  toStatus: TravelRequestStatus,
-  eventType: TimelineEventType,
-  actorId: string,
-  message: string,
-) {
-  const { error } = await supabase
-    .from("travel_requests")
-    .update({ status: toStatus })
-    .eq("id", travelRequestId);
-  if (error) throw new Error(`Transition de statut impossible (${fromStatus} → ${toStatus})`);
-
-  await supabase.from("timeline").insert({
-    travel_request_id: travelRequestId,
-    event_type: eventType,
-    from_status: fromStatus,
-    to_status: toStatus,
-    actor_type: "customer",
-    actor_id: actorId,
-    message,
-  });
 }
 
 export async function createTravelRequest() {
@@ -161,82 +123,58 @@ export async function uploadPassportPhoto(travelRequestId: string, formData: For
   if (!traveler) throw new Error("Voyageur introuvable");
 
   const file = formData.get("passport_photo");
-  if (!(file instanceof File) || file.size === 0) throw new Error("Aucune photo fournie");
-  if (file.size > MAX_UPLOAD_BYTES) throw new Error("Photo trop volumineuse (10 Mo max)");
-  const extension = MIME_TO_EXTENSION[file.type];
-  if (!extension) throw new Error("Format de photo non supporté (jpeg, png, webp ou heic)");
+  if (!(file instanceof File)) throw new Error("Aucune photo fournie");
 
-  const storagePath = `${travelRequestId}/${randomUUID()}.${extension}`;
-  const service = createServiceClient();
-  const { error: uploadError } = await service.storage
-    .from("passports")
-    .upload(storagePath, file, { contentType: file.type, upsert: false });
-  if (uploadError) throw new Error("Envoi de la photo impossible");
-
-  const retentionDays = await getPassportRetentionDays();
-  const scheduledDeletionAt = new Date(Date.now() + retentionDays * 24 * 60 * 60 * 1000).toISOString();
-
-  const { error: documentError } = await supabase.from("documents").insert({
-    travel_request_id: travelRequestId,
-    traveler_id: traveler.id,
-    document_type: "passport_photo",
-    storage_bucket: "passports",
-    storage_path: storagePath,
-    mime_type: file.type,
-    file_size_bytes: file.size,
-    capture_method: "desktop_upload",
-    scheduled_deletion_at: scheduledDeletionAt,
+  await runPassportUploadSequence({
+    travelRequestId,
+    travelerId: traveler.id,
+    currentStatus: travelRequest.status,
+    file,
+    captureMethod: "desktop_upload",
+    actorId: customer.id,
   });
-  if (documentError) throw new Error("Enregistrement de la photo impossible");
-
-  await supabase.from("timeline").insert({
-    travel_request_id: travelRequestId,
-    event_type: "document_uploaded",
-    actor_type: "customer",
-    actor_id: customer.id,
-    message: "Photo du passeport envoyée",
-  });
-
-  // Pas de microservice OCR dans cette tranche : fallback manuel immédiat,
-  // mais en respectant la même séquence de statuts que le vrai OCR aurait
-  // produite (cf. docs/etape-0-mvp-esta.md, section 5 — pas de raccourci
-  // direct scan_pending → to_verify).
-  await transitionStatus(
-    supabase,
-    travelRequestId,
-    travelRequest.status,
-    "scan_pending",
-    "status_change",
-    customer.id,
-    "Photo reçue, en attente de traitement",
-  );
-
-  await supabase
-    .from("travelers")
-    .update({ ocr_status: "manual", ocr_confidence_score: null, data_validated_by_customer: false })
-    .eq("id", traveler.id);
-
-  await transitionStatus(
-    supabase,
-    travelRequestId,
-    "scan_pending",
-    "ocr_done",
-    "ocr_processed",
-    customer.id,
-    "OCR indisponible dans cette version — saisie manuelle requise",
-  );
-
-  await transitionStatus(
-    supabase,
-    travelRequestId,
-    "ocr_done",
-    "to_verify",
-    "status_change",
-    customer.id,
-    "En attente de validation des informations par le client",
-  );
 
   revalidatePath(`/dashboard/${travelRequestId}`);
+}
+
+export async function createQrScanSession(travelRequestId: string) {
+  const supabase = await createClient();
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/connexion");
+
+  // Le select ci-dessous respecte la RLS (travel_requests_select) : si ce
+  // dossier n'appartient pas au client courant, aucune ligne n'est retournée.
+  const { data: travelRequest } = await supabase
+    .from("travel_requests")
+    .select("id, status")
+    .eq("id", travelRequestId)
+    .single();
+  if (!travelRequest) throw new Error("Dossier introuvable");
+  if (travelRequest.status !== "draft" && travelRequest.status !== "to_verify") {
+    throw new Error("Ce dossier n'accepte pas de nouvelle photo à ce stade");
+  }
+
+  const token = generateScanToken();
+  const ttlMinutes = await getQrSessionTtlMinutes();
+  const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
+
+  // qr_scan_sessions n'a aucune policy RLS (cf. db/schema.sql) : toute
+  // création/consommation passe exclusivement par service_role côté serveur.
+  const service = createServiceClient();
+  const { error } = await service.from("qr_scan_sessions").insert({
+    travel_request_id: travelRequestId,
+    token_hash: hashScanToken(token),
+    expires_at: expiresAt,
+  });
+  if (error) throw new Error("Création de la session de scan impossible");
+
+  const scanUrl = `${process.env.NEXT_PUBLIC_BASE_URL}/scan/${token}`;
+  const qrCodeDataUrl = await QRCode.toDataURL(scanUrl);
+
+  return { scanUrl, qrCodeDataUrl, expiresAt };
 }
 
 export async function submitTravelerDetails(travelerId: string, formData: FormData) {
