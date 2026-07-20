@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { createQrScanSession } from "../actions";
+import { AnalysisSteps, QR_WAITING_STEPS } from "@/components/analysis-steps";
 
 type QrSession = {
   scanUrl: string;
@@ -85,9 +86,12 @@ export function QrScanPanel({ travelRequestId }: { travelRequestId: string }) {
         <p className="mt-1 break-all text-xs text-black/40 dark:text-white/40">
           Ou ouvrez ce lien : {session.scanUrl}
         </p>
+
+        <AnalysisSteps active={true} steps={QR_WAITING_STEPS} />
+
         <p className="mt-2 text-xs text-black/40 dark:text-white/40">
           Expire dans {session.minutesLeft} min. Cette page se mettra à jour automatiquement une fois la
-          photo envoyée.
+          photo envoyée et analysée.
         </p>
       </div>
     );

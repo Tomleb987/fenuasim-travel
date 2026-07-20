@@ -1,6 +1,10 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
+import { revalidatePath } from "next/cache";
 import { createServiceClient } from "@/lib/supabase/service";
+import { encryptPassportField } from "@/lib/crypto/passport-encryption";
+import { bytesToPgHex } from "@/lib/postgres-bytea";
+import { callOcrService } from "@/lib/ocr/client";
 import type { Database } from "@/lib/supabase/database.types";
 
 // Partagé entre l'upload direct (src/app/dashboard/actions.ts, session client
@@ -36,6 +40,18 @@ export async function getPassportRetentionDays(): Promise<number> {
     .single();
 
   if (error || !data) throw new Error("Impossible de lire la durée de rétention (app_settings)");
+  return Number(data.value);
+}
+
+export async function getOcrConfidenceThreshold(): Promise<number> {
+  const service = createServiceClient();
+  const { data, error } = await service
+    .from("app_settings")
+    .select("value")
+    .eq("key", "ocr_confidence_threshold")
+    .single();
+
+  if (error || !data) throw new Error("Impossible de lire le seuil de confiance OCR (app_settings)");
   return Number(data.value);
 }
 
@@ -120,10 +136,6 @@ export async function runPassportUploadSequence({
       captureMethod === "qr_scan" ? "Photo du passeport envoyée (scan QR)" : "Photo du passeport envoyée",
   });
 
-  // Pas de microservice OCR dans cette tranche : fallback manuel immédiat,
-  // mais en respectant la même séquence de statuts que le vrai OCR aurait
-  // produite (cf. docs/etape-0-mvp-esta.md, section 5 — pas de raccourci
-  // direct scan_pending → to_verify).
   await transitionStatus(
     service,
     travelRequestId,
@@ -131,23 +143,73 @@ export async function runPassportUploadSequence({
     "scan_pending",
     "status_change",
     actorId,
-    "Photo reçue, en attente de traitement",
+    "Photo reçue, analyse en cours…",
   );
 
-  await service
-    .from("travelers")
-    .update({ ocr_status: "manual", ocr_confidence_score: null, data_validated_by_customer: false })
-    .eq("id", travelerId);
+  const ocrResult = await callOcrService(file);
+  const threshold = await getOcrConfidenceThreshold();
 
-  await transitionStatus(
-    service,
-    travelRequestId,
-    "scan_pending",
-    "ocr_done",
-    "ocr_processed",
-    actorId,
-    "OCR indisponible dans cette version — saisie manuelle requise",
-  );
+  if (ocrResult.success && ocrResult.confidence >= threshold) {
+    const { encrypted: encryptedPassportNumber, keyVersion } = encryptPassportField(
+      ocrResult.fields.passport_number ?? "",
+    );
+    const { encrypted: encryptedMrz } = encryptPassportField(ocrResult.mrzRaw);
+
+    await service
+      .from("travelers")
+      .update({
+        first_name: ocrResult.fields.first_name,
+        last_name: ocrResult.fields.last_name,
+        sex: ocrResult.fields.sex,
+        date_of_birth: ocrResult.fields.date_of_birth,
+        nationality: ocrResult.fields.nationality,
+        passport_number_encrypted: bytesToPgHex(encryptedPassportNumber),
+        passport_number_last4: (ocrResult.fields.passport_number ?? "").slice(-4),
+        passport_issuing_country: ocrResult.fields.passport_issuing_country,
+        passport_expiry_date: ocrResult.fields.passport_expiry_date,
+        mrz_encrypted: bytesToPgHex(encryptedMrz),
+        encryption_key_version: keyVersion,
+        ocr_status: "success",
+        ocr_confidence_score: ocrResult.confidence,
+        data_validated_by_customer: false,
+      })
+      .eq("id", travelerId);
+
+    await transitionStatus(
+      service,
+      travelRequestId,
+      "scan_pending",
+      "ocr_done",
+      "ocr_processed",
+      actorId,
+      `Lecture automatique réussie (confiance ${Math.round(ocrResult.confidence * 100)}%)`,
+    );
+  } else {
+    // Échec du service, timeout, ou confiance sous le seuil : même
+    // comportement que le fallback manuel — champs vides, tout reste à
+    // saisir par le client (cf. docs/etape-0-mvp-esta.md, section 3.1 :
+    // "confiance < seuil -> champs vides").
+    await service
+      .from("travelers")
+      .update({
+        ocr_status: ocrResult.success ? "low_confidence" : "failed",
+        ocr_confidence_score: ocrResult.success ? ocrResult.confidence : null,
+        data_validated_by_customer: false,
+      })
+      .eq("id", travelerId);
+
+    await transitionStatus(
+      service,
+      travelRequestId,
+      "scan_pending",
+      "ocr_done",
+      "ocr_processed",
+      actorId,
+      ocrResult.success
+        ? `Lecture automatique peu fiable (confiance ${Math.round(ocrResult.confidence * 100)}%) — saisie manuelle requise`
+        : "Lecture automatique indisponible — saisie manuelle requise",
+    );
+  }
 
   await transitionStatus(
     service,
@@ -158,4 +220,13 @@ export async function runPassportUploadSequence({
     actorId,
     "En attente de validation des informations par le client",
   );
+
+  // Indispensable pour le relais QR : l'upload arrive via une requête du
+  // téléphone (src/app/scan/actions.ts), sur une route Next.js différente
+  // de celle affichée sur le desktop. Sans ce revalidatePath ici (dans la
+  // fonction partagée), le polling/Realtime du desktop peut réclamer un
+  // rafraîchissement (router.refresh()) sans jamais obtenir de données
+  // fraîches tant que le cache de la route /dashboard/[id] n'a pas été
+  // invalidé côté serveur.
+  revalidatePath(`/dashboard/${travelRequestId}`);
 }

@@ -133,8 +133,6 @@ export async function uploadPassportPhoto(travelRequestId: string, formData: For
     captureMethod: "desktop_upload",
     actorId: customer.id,
   });
-
-  revalidatePath(`/dashboard/${travelRequestId}`);
 }
 
 export async function createQrScanSession(travelRequestId: string) {

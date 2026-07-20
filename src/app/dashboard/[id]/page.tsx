@@ -6,6 +6,8 @@ import { getPassportPreviewUrl } from "../actions";
 import { PassportUploadForm } from "./passport-upload-form";
 import { TravelerDetailsForm } from "./traveler-details-form";
 import { QrScanPanel } from "./qr-scan-panel";
+import { decryptPassportField } from "@/lib/crypto/passport-encryption";
+import { pgHexToBytes } from "@/lib/postgres-bytea";
 
 export default async function TravelRequestPage({
   params,
@@ -31,9 +33,32 @@ export default async function TravelRequestPage({
 
   const { data: traveler } = await supabase
     .from("travelers")
-    .select("id, data_validated_by_customer")
+    .select(
+      "id, data_validated_by_customer, ocr_status, ocr_confidence_score, first_name, last_name, sex, date_of_birth, nationality, passport_number_encrypted, passport_issuing_country, passport_expiry_date, encryption_key_version",
+    )
     .eq("travel_request_id", id)
     .single();
+
+  // Pré-remplissage du formulaire uniquement quand la lecture automatique a
+  // réussi avec une confiance suffisante (ocr_status = 'success') : on
+  // déchiffre alors le numéro de passeport pour le réafficher au client —
+  // légitime ici, il ne s'agit que de lui montrer ses propres informations.
+  const travelerInitialValues =
+    traveler?.ocr_status === "success" && traveler.passport_number_encrypted
+      ? {
+          first_name: traveler.first_name,
+          last_name: traveler.last_name,
+          sex: traveler.sex,
+          date_of_birth: traveler.date_of_birth,
+          nationality: traveler.nationality,
+          passport_number: decryptPassportField(
+            pgHexToBytes(traveler.passport_number_encrypted),
+            traveler.encryption_key_version,
+          ),
+          passport_issuing_country: traveler.passport_issuing_country,
+          passport_expiry_date: traveler.passport_expiry_date,
+        }
+      : undefined;
 
   const { data: latestDocument } = await supabase
     .from("documents")
@@ -72,7 +97,11 @@ export default async function TravelRequestPage({
 
       {travelRequest.status === "to_verify" && traveler && !traveler.data_validated_by_customer && (
         <>
-          <TravelerDetailsForm travelerId={traveler.id} previewUrl={previewUrl} />
+          <TravelerDetailsForm
+            travelerId={traveler.id}
+            previewUrl={previewUrl}
+            initialValues={travelerInitialValues}
+          />
           <details className="mt-4">
             <summary className="cursor-pointer text-sm text-black/60 hover:underline dark:text-white/60">
               La photo n&apos;est pas exploitable ? Remplacez-la

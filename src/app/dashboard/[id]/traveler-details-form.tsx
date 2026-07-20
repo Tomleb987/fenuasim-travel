@@ -4,12 +4,25 @@ import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { submitTravelerDetails } from "../actions";
 
+type InitialValues = {
+  first_name: string | null;
+  last_name: string | null;
+  sex: string | null;
+  date_of_birth: string | null;
+  nationality: string | null;
+  passport_number: string | null;
+  passport_issuing_country: string | null;
+  passport_expiry_date: string | null;
+};
+
 export function TravelerDetailsForm({
   travelerId,
   previewUrl,
+  initialValues,
 }: {
   travelerId: string;
   previewUrl: string | null;
+  initialValues?: InitialValues;
 }) {
   const router = useRouter();
   const [status, setStatus] = useState<"idle" | "saving">("idle");
@@ -39,8 +52,9 @@ export function TravelerDetailsForm({
         Vérifiez vos informations
       </h2>
       <p className="mt-2 text-sm text-black/60 dark:text-white/60">
-        La lecture automatique n&apos;est pas encore disponible : merci de saisir vous-même les
-        informations de votre passeport. Tous les champs sont modifiables.
+        {initialValues
+          ? "Vérifiez les informations lues automatiquement sur votre passeport. Tous les champs restent modifiables."
+          : "La lecture automatique n'a pas fonctionné sur cette photo : merci de saisir vous-même les informations de votre passeport. Tous les champs sont modifiables."}
       </p>
 
       {previewUrl && (
@@ -56,18 +70,28 @@ export function TravelerDetailsForm({
         <div className="grid grid-cols-2 gap-3">
           <label className="space-y-1">
             <span className={labelClass}>Prénom</span>
-            <input name="first_name" required className={inputClass} />
+            <input
+              name="first_name"
+              required
+              defaultValue={initialValues?.first_name ?? ""}
+              className={inputClass}
+            />
           </label>
           <label className="space-y-1">
             <span className={labelClass}>Nom</span>
-            <input name="last_name" required className={inputClass} />
+            <input
+              name="last_name"
+              required
+              defaultValue={initialValues?.last_name ?? ""}
+              className={inputClass}
+            />
           </label>
         </div>
 
         <div className="grid grid-cols-2 gap-3">
           <label className="space-y-1">
             <span className={labelClass}>Sexe</span>
-            <select name="sex" required defaultValue="" className={inputClass}>
+            <select name="sex" required defaultValue={initialValues?.sex ?? ""} className={inputClass}>
               <option value="" disabled>
                 Sélectionner
               </option>
@@ -78,28 +102,57 @@ export function TravelerDetailsForm({
           </label>
           <label className="space-y-1">
             <span className={labelClass}>Date de naissance</span>
-            <input type="date" name="date_of_birth" required className={inputClass} />
+            <input
+              type="date"
+              name="date_of_birth"
+              required
+              defaultValue={initialValues?.date_of_birth ?? ""}
+              className={inputClass}
+            />
           </label>
         </div>
 
         <label className="block space-y-1">
           <span className={labelClass}>Nationalité (code pays, ex. FRA)</span>
-          <input name="nationality" required maxLength={3} className={inputClass} />
+          <input
+            name="nationality"
+            required
+            maxLength={3}
+            defaultValue={initialValues?.nationality ?? ""}
+            className={inputClass}
+          />
         </label>
 
         <label className="block space-y-1">
           <span className={labelClass}>Numéro de passeport</span>
-          <input name="passport_number" required className={inputClass} />
+          <input
+            name="passport_number"
+            required
+            defaultValue={initialValues?.passport_number ?? ""}
+            className={inputClass}
+          />
         </label>
 
         <div className="grid grid-cols-2 gap-3">
           <label className="space-y-1">
             <span className={labelClass}>Pays émetteur (code, ex. FRA)</span>
-            <input name="passport_issuing_country" required maxLength={3} className={inputClass} />
+            <input
+              name="passport_issuing_country"
+              required
+              maxLength={3}
+              defaultValue={initialValues?.passport_issuing_country ?? ""}
+              className={inputClass}
+            />
           </label>
           <label className="space-y-1">
             <span className={labelClass}>Date d&apos;expiration</span>
-            <input type="date" name="passport_expiry_date" required className={inputClass} />
+            <input
+              type="date"
+              name="passport_expiry_date"
+              required
+              defaultValue={initialValues?.passport_expiry_date ?? ""}
+              className={inputClass}
+            />
           </label>
         </div>
 

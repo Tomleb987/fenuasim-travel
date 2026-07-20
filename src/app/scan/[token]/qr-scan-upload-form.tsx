@@ -2,6 +2,7 @@
 
 import { useState, type ChangeEvent, type FormEvent } from "react";
 import { uploadPassportPhotoViaQrSession } from "../actions";
+import { AnalysisSteps } from "@/components/analysis-steps";
 
 const ACCEPTED_MIME_TYPES = ["image/jpeg", "image/png", "image/webp", "image/heic"];
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -10,6 +11,7 @@ export function QrScanUploadForm({ token }: { token: string }) {
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "uploading" | "done">("idle");
+  const [attempt, setAttempt] = useState(0);
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const selected = event.target.files?.[0] ?? null;
@@ -38,6 +40,7 @@ export function QrScanUploadForm({ token }: { token: string }) {
 
     setStatus("uploading");
     setError(null);
+    setAttempt((a) => a + 1);
 
     try {
       const formData = new FormData();
@@ -79,9 +82,10 @@ export function QrScanUploadForm({ token }: { token: string }) {
           boxShadow: "0 2px 10px rgba(160,32,240,.3)",
         }}
       >
-        {status === "uploading" ? "Envoi…" : "Envoyer la photo"}
+        {status === "uploading" ? "Analyse en cours…" : "Envoyer la photo"}
       </button>
       {error && <p className="text-sm text-red-700">{error}</p>}
+      <AnalysisSteps key={attempt} active={status === "uploading"} />
     </form>
   );
 }
