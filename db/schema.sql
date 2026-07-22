@@ -226,6 +226,7 @@ create table documents (
 );
 
 create index documents_travel_request_id_idx on documents (travel_request_id);
+create index documents_traveler_id_idx on documents (traveler_id);
 create index documents_scheduled_deletion_idx on documents (scheduled_deletion_at) where deleted_at is null;
 
 create trigger trg_documents_updated_at before update on documents
@@ -270,6 +271,7 @@ create table answers (
 
 create index answers_travel_request_id_idx on answers (travel_request_id);
 create index answers_traveler_id_idx on answers (traveler_id);
+create index answers_questionnaire_id_idx on answers (questionnaire_id);
 create unique index answers_unique_question_idx on answers (traveler_id, questionnaire_id, question_key) where deleted_at is null;
 
 create trigger trg_answers_updated_at before update on answers
@@ -341,6 +343,7 @@ create table mandates (
 );
 
 create index mandates_travel_request_id_idx on mandates (travel_request_id);
+create index mandates_customer_id_idx on mandates (customer_id);
 
 create trigger trg_mandates_updated_at before update on mandates
   for each row execute function set_updated_at();
@@ -420,6 +423,7 @@ create table qr_scan_sessions (
 );
 
 create index qr_scan_sessions_expires_idx on qr_scan_sessions (expires_at);
+create index qr_scan_sessions_travel_request_id_idx on qr_scan_sessions (travel_request_id);
 
 create trigger trg_qr_scan_sessions_updated_at before update on qr_scan_sessions
   for each row execute function set_updated_at();
@@ -437,6 +441,8 @@ create table app_settings (
   updated_at  timestamptz not null default now(),
   updated_by  uuid references admin_users(id)
 );
+
+create index app_settings_updated_by_idx on app_settings (updated_by);
 
 insert into app_settings (key, value, description) values
   ('esta_price_cents', '3000', 'Frais de service FENUASIM par dossier, en centimes EUR (30,00 €)'),
@@ -539,13 +545,16 @@ $$;
 -- ----------------------------------------------------------------------------
 -- Policies — customers
 -- ----------------------------------------------------------------------------
+-- `(select auth.uid())` plutôt que `auth.uid()` nu : évalué une seule fois par
+-- requête (initplan) au lieu d'une fois par ligne — cf. advisor Supabase
+-- "Auth RLS Initialization Plan" (Sprint 6, performance).
 create policy customers_select on customers for select
-  using (auth_user_id = auth.uid() or private.is_staff());
+  using (auth_user_id = (select auth.uid()) or private.is_staff());
 create policy customers_insert on customers for insert
-  with check (auth_user_id = auth.uid());
+  with check (auth_user_id = (select auth.uid()));
 create policy customers_update on customers for update
-  using (auth_user_id = auth.uid() or private.is_staff())
-  with check (auth_user_id = auth.uid() or private.is_staff());
+  using (auth_user_id = (select auth.uid()) or private.is_staff())
+  with check (auth_user_id = (select auth.uid()) or private.is_staff());
 
 -- Sprint 6 (revue de sécurité) — durcissement : le seul usage légitime de
 -- réassigner customers.auth_user_id est la liaison au premier login
@@ -610,9 +619,16 @@ create policy documents_update on documents for update
 -- ----------------------------------------------------------------------------
 create policy questionnaires_select on questionnaires for select
   using (is_active = true or private.is_staff());
-create policy questionnaires_write on questionnaires for all
+-- `for insert/update/delete` distincts plutôt qu'un unique `for all` : un
+-- `for all` duplique une évaluation SELECT déjà couverte par
+-- questionnaires_select, cf. advisor "Multiple Permissive Policies" (Sprint 6).
+create policy questionnaires_insert on questionnaires for insert
+  with check (private.is_admin_or_above());
+create policy questionnaires_update on questionnaires for update
   using (private.is_admin_or_above())
   with check (private.is_admin_or_above());
+create policy questionnaires_delete on questionnaires for delete
+  using (private.is_admin_or_above());
 
 -- ----------------------------------------------------------------------------
 -- Policies — answers
@@ -670,10 +686,10 @@ grant select, insert on timeline to authenticated, service_role;
 -- chaque membre du staff peut lire/mettre à jour sa propre ligne, ex. enrôlement MFA)
 -- ----------------------------------------------------------------------------
 create policy admin_users_select on admin_users for select
-  using (auth_user_id = auth.uid() or private.is_staff());
+  using (auth_user_id = (select auth.uid()) or private.is_staff());
 create policy admin_users_update on admin_users for update
-  using (auth_user_id = auth.uid() or private.is_superadmin())
-  with check (auth_user_id = auth.uid() or private.is_superadmin());
+  using (auth_user_id = (select auth.uid()) or private.is_superadmin())
+  with check (auth_user_id = (select auth.uid()) or private.is_superadmin());
 create policy admin_users_insert on admin_users for insert
   with check (private.is_superadmin());
 create policy admin_users_delete on admin_users for delete
@@ -722,9 +738,14 @@ create trigger trg_admin_users_guard_update
 -- ----------------------------------------------------------------------------
 create policy app_settings_select on app_settings for select
   using (private.is_staff());
-create policy app_settings_write on app_settings for all
+-- même raisonnement que questionnaires_insert/update/delete ci-dessus.
+create policy app_settings_insert on app_settings for insert
+  with check (private.is_admin_or_above());
+create policy app_settings_update on app_settings for update
   using (private.is_admin_or_above())
   with check (private.is_admin_or_above());
+create policy app_settings_delete on app_settings for delete
+  using (private.is_admin_or_above());
 
 -- ----------------------------------------------------------------------------
 -- Fonction — activate_questionnaire_version (Sprint 3)
