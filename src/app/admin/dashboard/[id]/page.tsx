@@ -4,7 +4,13 @@ import { getStaffMember } from "@/lib/admin/require-staff";
 import { createClient } from "@/lib/supabase/server";
 import { TRAVEL_REQUEST_STATUS_LABELS } from "@/lib/status";
 import { formatAnswerValue, parseQuestionnaireSchema } from "@/lib/questionnaire/types";
+import { decryptPassportField } from "@/lib/crypto/passport-encryption";
+import { pgHexToBytes } from "@/lib/postgres-bytea";
+import { getPassportPreviewUrl } from "@/app/dashboard/actions";
 import { RefundForm } from "./refund-form";
+import { TravelerCorrectionForm } from "./traveler-correction-form";
+import { StatusNoteForm } from "./status-note-form";
+import { RealtimeRefresher } from "./realtime-refresher";
 
 export default async function AdminTravelRequestPage({ params }: { params: Promise<{ id: string }> }) {
   const staff = await getStaffMember();
@@ -23,9 +29,46 @@ export default async function AdminTravelRequestPage({ params }: { params: Promi
 
   const { data: traveler } = await supabase
     .from("travelers")
-    .select("id, first_name, last_name")
+    .select(
+      "id, first_name, last_name, sex, date_of_birth, nationality, passport_number_encrypted, passport_issuing_country, passport_expiry_date, encryption_key_version",
+    )
     .eq("travel_request_id", id)
     .maybeSingle();
+
+  // Contrairement au gate côté client (ocr_status === 'success'), l'admin doit
+  // pouvoir voir/corriger les informations dès qu'elles existent, qu'elles
+  // viennent de l'OCR ou d'une saisie manuelle.
+  const travelerCorrectionValues = traveler?.passport_number_encrypted
+    ? {
+        first_name: traveler.first_name,
+        last_name: traveler.last_name,
+        sex: traveler.sex,
+        date_of_birth: traveler.date_of_birth,
+        nationality: traveler.nationality,
+        passport_number: decryptPassportField(
+          pgHexToBytes(traveler.passport_number_encrypted),
+          traveler.encryption_key_version,
+        ),
+        passport_issuing_country: traveler.passport_issuing_country,
+        passport_expiry_date: traveler.passport_expiry_date,
+      }
+    : null;
+
+  const { data: latestDocument } = await supabase
+    .from("documents")
+    .select("id")
+    .eq("travel_request_id", id)
+    .is("deleted_at", null)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const previewUrl = latestDocument ? await getPassportPreviewUrl(latestDocument.id) : null;
+
+  const { data: timeline } = await supabase
+    .from("timeline")
+    .select("id, event_type, actor_type, message, created_at")
+    .eq("travel_request_id", id)
+    .order("created_at", { ascending: false });
 
   const { data: answers } = traveler
     ? await supabase
@@ -56,6 +99,8 @@ export default async function AdminTravelRequestPage({ params }: { params: Promi
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-16">
+      <RealtimeRefresher travelRequestId={travelRequest.id} />
+
       <Link href="/admin/dashboard" className="text-sm text-black/60 hover:underline dark:text-white/60">
         ← Dossiers
       </Link>
@@ -69,6 +114,30 @@ export default async function AdminTravelRequestPage({ params }: { params: Promi
       {traveler?.first_name && (
         <p className="mt-1 text-sm text-black/60 dark:text-white/60">
           Voyageur : {traveler.first_name} {traveler.last_name}
+        </p>
+      )}
+
+      <h2 className="mt-10 text-sm font-semibold uppercase tracking-wider text-black/60 dark:text-white/60">
+        Statut &amp; notes
+      </h2>
+      <StatusNoteForm travelRequestId={travelRequest.id} currentStatus={travelRequest.status} />
+
+      <h2 className="mt-10 text-sm font-semibold uppercase tracking-wider text-black/60 dark:text-white/60">
+        Passeport
+      </h2>
+      {previewUrl && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={previewUrl}
+          alt="Photo du passeport envoyée"
+          className="mt-3 max-h-64 rounded-lg border border-black/10 dark:border-white/10"
+        />
+      )}
+      {traveler && travelerCorrectionValues ? (
+        <TravelerCorrectionForm travelerId={traveler.id} initialValues={travelerCorrectionValues} />
+      ) : (
+        <p className="mt-3 text-sm text-black/60 dark:text-white/60">
+          Aucune information passeport enregistrée pour le moment.
         </p>
       )}
 
@@ -163,6 +232,26 @@ export default async function AdminTravelRequestPage({ params }: { params: Promi
       ) : (
         <p className="mt-3 text-sm text-black/60 dark:text-white/60">Pas encore de paiement.</p>
       )}
+
+      <h2 className="mt-10 text-sm font-semibold uppercase tracking-wider text-black/60 dark:text-white/60">
+        Historique complet
+      </h2>
+      <ul className="mt-3 space-y-3">
+        {(timeline ?? []).map((event) => (
+          <li key={event.id} className="text-sm">
+            <span className="text-black/40 dark:text-white/40">
+              {new Date(event.created_at).toLocaleString("fr-FR")}
+            </span>{" "}
+            {event.actor_type === "admin" && (event.event_type === "note" || event.event_type === "admin_action") && (
+              <span className="text-xs font-medium text-fenua-violet">[interne] </span>
+            )}
+            — {event.message ?? event.event_type}
+          </li>
+        ))}
+        {(timeline ?? []).length === 0 && (
+          <li className="text-sm text-black/60 dark:text-white/60">Aucun événement pour le moment.</li>
+        )}
+      </ul>
     </div>
   );
 }

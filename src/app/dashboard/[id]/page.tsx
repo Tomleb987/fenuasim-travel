@@ -80,11 +80,18 @@ export default async function TravelRequestPage({
 
   const previewUrl = latestDocument ? await getPassportPreviewUrl(latestDocument.id) : null;
 
-  const { data: timeline } = await supabase
+  const { data: timelineRows } = await supabase
     .from("timeline")
-    .select("id, event_type, message, created_at")
+    .select("id, event_type, actor_type, message, created_at")
     .eq("travel_request_id", id)
     .order("created_at", { ascending: false });
+
+  // timeline_select laisse le client lire toutes ses lignes sans distinction :
+  // les notes internes et corrections opérateur (actor_type 'admin') ne
+  // doivent jamais lui parvenir, ce filtre est la seule barrière.
+  const timeline = (timelineRows ?? []).filter(
+    (event) => !(event.actor_type === "admin" && (event.event_type === "note" || event.event_type === "admin_action")),
+  );
 
   // Chargé uniquement quand pertinent (données passeport déjà validées) :
   // évite une requête inutile pour un dossier encore en amont du parcours.
@@ -237,7 +244,7 @@ export default async function TravelRequestPage({
         Historique
       </h2>
       <ul className="mt-3 space-y-3">
-        {(timeline ?? []).map((event) => (
+        {timeline.map((event) => (
           <li key={event.id} className="text-sm">
             <span className="text-black/40 dark:text-white/40">
               {new Date(event.created_at).toLocaleString("fr-FR")}

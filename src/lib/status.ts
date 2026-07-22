@@ -1,5 +1,9 @@
+import type { Database } from "@/lib/supabase/database.types";
+
+export type TravelRequestStatus = Database["public"]["Enums"]["travel_request_status"];
+
 // Libellés client, cf. docs/etape-0-mvp-esta.md section 5.
-export const TRAVEL_REQUEST_STATUS_LABELS: Record<string, string> = {
+export const TRAVEL_REQUEST_STATUS_LABELS: Record<TravelRequestStatus, string> = {
   draft: "Brouillon",
   scan_pending: "Scan en attente",
   ocr_done: "OCR terminé",
