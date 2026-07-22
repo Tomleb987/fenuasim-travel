@@ -547,6 +547,31 @@ create policy customers_update on customers for update
   using (auth_user_id = auth.uid() or private.is_staff())
   with check (auth_user_id = auth.uid() or private.is_staff());
 
+-- Sprint 6 (revue de sécurité) — durcissement : le seul usage légitime de
+-- réassigner customers.auth_user_id est la liaison au premier login
+-- (src/app/auth/callback/route.ts, ensureCustomer), qui passe déjà par
+-- service_role. Rien n'empêchait pourtant un membre du staff de le faire via
+-- sa propre session authentifiée (surface de permission inutile, pas
+-- d'escalade de privilège directe mais un vecteur de détournement de compte
+-- client) — bloqué ici pour toute session autre que service_role.
+create or replace function private.guard_customers_update()
+returns trigger
+language plpgsql
+security definer
+set search_path = private, public
+as $$
+begin
+  if session_user <> 'service_role' and new.auth_user_id is distinct from old.auth_user_id then
+    raise exception 'Modification réservée au service';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_customers_guard_update
+  before update on customers
+  for each row execute function private.guard_customers_update();
+
 -- ----------------------------------------------------------------------------
 -- Policies — travel_requests
 -- ----------------------------------------------------------------------------
@@ -653,6 +678,36 @@ create policy admin_users_insert on admin_users for insert
   with check (private.is_superadmin());
 create policy admin_users_delete on admin_users for delete
   using (private.is_superadmin());
+
+-- Sprint 6 (revue de sécurité) — faille corrigée : le "auth_user_id = auth.uid()"
+-- de admin_users_update visait uniquement l'auto-enrôlement MFA
+-- (src/app/admin/mfa/mfa-form.tsx, update mfa_enabled), mais la policy ne
+-- restreint aucune colonne — n'importe quel staff pouvait s'auto-promouvoir
+-- superadmin via un simple update direct. `with check` ne permet pas de
+-- comparer proprement OLD/NEW, d'où un trigger dédié.
+create or replace function private.guard_admin_users_update()
+returns trigger
+language plpgsql
+security definer
+set search_path = private, public
+as $$
+begin
+  if not private.is_superadmin() then
+    if new.role is distinct from old.role
+      or new.is_active is distinct from old.is_active
+      or new.deleted_at is distinct from old.deleted_at
+      or new.auth_user_id is distinct from old.auth_user_id
+    then
+      raise exception 'Modification réservée au superadmin';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_admin_users_guard_update
+  before update on admin_users
+  for each row execute function private.guard_admin_users_update();
 
 -- ----------------------------------------------------------------------------
 -- Policies — qr_scan_sessions : AUCUNE (RLS activée sans policy = accès refusé

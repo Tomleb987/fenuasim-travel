@@ -28,6 +28,34 @@ const MIME_TO_EXTENSION: Record<string, string> = {
 };
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 Mo, cohérent avec db/storage-setup.sql
 
+// Défense en profondeur : `file.type` est déclaré par le client (en-tête
+// Content-Type de la partie multipart), donc trivialement falsifiable — ce
+// contrôle vérifie les premiers octets réels du fichier plutôt que de faire
+// confiance à cette déclaration.
+const MAGIC_BYTE_VALIDATORS: Record<string, (bytes: Uint8Array) => boolean> = {
+  "image/jpeg": (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
+  "image/png": (b) =>
+    b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 && b[4] === 0x0d && b[5] === 0x0a,
+  "image/webp": (b) =>
+    b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && // "RIFF"
+    b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50, // "WEBP"
+  "image/heic": (b) => {
+    // Conteneur ISOBMFF : boîte "ftyp" à l'offset 4, marque HEIC/HEIF à l'offset 8.
+    const isFtyp = b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70;
+    if (!isFtyp) return false;
+    const brand = String.fromCharCode(b[8], b[9], b[10], b[11]);
+    return ["heic", "heix", "hevc", "heim", "heis", "mif1", "msf1"].includes(brand);
+  },
+};
+
+async function assertFileContentMatchesDeclaredMime(file: File): Promise<void> {
+  const validator = MAGIC_BYTE_VALIDATORS[file.type];
+  const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+  if (!validator || !validator(head)) {
+    throw new Error("Le contenu du fichier ne correspond pas à un format d'image supporté");
+  }
+}
+
 // app_settings n'a aucune policy de lecture pour un client authentifié
 // (cf. db/schema.sql, section RLS) : ces valeurs sont lues côté serveur via
 // service_role, jamais exposées en direct au front (docs section 9).
@@ -103,6 +131,7 @@ export async function runPassportUploadSequence({
   if (file.size > MAX_UPLOAD_BYTES) throw new Error("Photo trop volumineuse (10 Mo max)");
   const extension = MIME_TO_EXTENSION[file.type];
   if (!extension) throw new Error("Format de photo non supporté (jpeg, png, webp ou heic)");
+  await assertFileContentMatchesDeclaredMime(file);
 
   const service = createServiceClient();
   const storagePath = `${travelRequestId}/${randomUUID()}.${extension}`;

@@ -36,13 +36,23 @@ export async function callOcrService(file: File): Promise<OcrResult> {
       signal: AbortSignal.timeout(12000),
     });
     if (!response.ok) {
-      console.error("OCR service: réponse non-2xx", response.status, await response.text());
+      // Ne jamais logger le corps de la réponse : peut contenir la MRZ / le
+      // numéro de passeport en clair si le service a partiellement traité
+      // l'image avant l'échec.
+      console.error("OCR service: réponse non-2xx", response.status);
       return { success: false };
     }
 
     const data = await response.json();
     if (!data.success || !data.fields || typeof data.confidence !== "number") {
-      console.error("OCR service: réponse sans résultat exploitable", JSON.stringify(data));
+      // Idem : ne loguer que la forme de la réponse (quelles clés manquent),
+      // jamais son contenu — `data.fields`/`data.mrz_raw` sont potentiellement
+      // des données passeport en clair.
+      console.error("OCR service: réponse sans résultat exploitable", {
+        hasSuccess: Boolean(data?.success),
+        hasFields: Boolean(data?.fields),
+        confidenceType: typeof data?.confidence,
+      });
       return { success: false };
     }
 
