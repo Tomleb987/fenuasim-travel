@@ -120,7 +120,19 @@ def _crop_with_padding(
 def _normalize_candidate_line(text: str) -> str:
     cleaned = _MRZ_CHARSET.sub("", text.upper())
     if len(cleaned) < _MRZ_LINE_LEN:
-        cleaned = cleaned.ljust(_MRZ_LINE_LEN, "<")
+        missing = _MRZ_LINE_LEN - len(cleaned)
+        # PaddleOCR régulièrement ne détecte qu'un seul "<" pour un long run
+        # de remplissage (jusqu'à 14 consécutifs sur la ligne 2 TD3), ce qui
+        # décale tout ce qui suit (dont les digits de contrôle finaux) si on
+        # se contente d'ajouter le padding manquant en toute fin de chaîne.
+        # On le réinjecte plutôt à l'emplacement du dernier "<" détecté, pour
+        # que les caractères suivants (digits de contrôle) retrouvent leur
+        # position absolue correcte dans la ligne de 44 caractères.
+        last_chevron = cleaned.rfind("<")
+        if last_chevron != -1:
+            cleaned = cleaned[:last_chevron] + "<" * (missing + 1) + cleaned[last_chevron + 1 :]
+        else:
+            cleaned = cleaned.ljust(_MRZ_LINE_LEN, "<")
     return cleaned[:_MRZ_LINE_LEN]
 
 
@@ -138,8 +150,14 @@ def _mrz_score(raw_text: str) -> float:
 
     valid_chars = sum(1 for c in cleaned if c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<")
     charset_ratio = valid_chars / len(cleaned)
-    chevron_ratio = cleaned.count("<") / len(cleaned)
-    if chevron_ratio < 0.1 or charset_ratio < 0.9:
+    # Le détecteur PaddleOCR tronque souvent la boîte englobante avant la fin
+    # d'un long run de "<" de remplissage (ligne 2 TD3 : jusqu'à 20 "<"
+    # consécutifs) : une ligne correctement lue peut donc n'avoir plus qu'un
+    # seul "<" survivant, bien en dessous d'un seuil en ratio. Un seul "<"
+    # suffit déjà à distinguer une MRZ d'un texte normal (qui n'en contient
+    # jamais) sans être sensible à cette troncature.
+    has_chevron = "<" in cleaned
+    if not has_chevron or charset_ratio < 0.9:
         return 0.0
 
     length_score = max(0.0, 1.0 - abs(len(cleaned) - _MRZ_LINE_LEN) / _MRZ_LINE_LEN)
