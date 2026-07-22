@@ -4,6 +4,7 @@ import { getStaffMember } from "@/lib/admin/require-staff";
 import { createClient } from "@/lib/supabase/server";
 import { TRAVEL_REQUEST_STATUS_LABELS } from "@/lib/status";
 import { formatAnswerValue, parseQuestionnaireSchema } from "@/lib/questionnaire/types";
+import { RefundForm } from "./refund-form";
 
 export default async function AdminTravelRequestPage({ params }: { params: Promise<{ id: string }> }) {
   const staff = await getStaffMember();
@@ -43,6 +44,15 @@ export default async function AdminTravelRequestPage({ params }: { params: Promi
         .is("deleted_at", null)
         .maybeSingle()
     : { data: null };
+
+  const { data: payment } = await supabase
+    .from("payments")
+    .select("id, status, amount_cents, currency, refunded_at, refund_reason")
+    .eq("travel_request_id", id)
+    .is("deleted_at", null)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-16">
@@ -131,6 +141,27 @@ export default async function AdminTravelRequestPage({ params }: { params: Promi
         </dl>
       ) : (
         <p className="mt-3 text-sm text-black/60 dark:text-white/60">Pas encore signé.</p>
+      )}
+
+      <h2 className="mt-10 text-sm font-semibold uppercase tracking-wider text-black/60 dark:text-white/60">
+        Paiement
+      </h2>
+      {payment ? (
+        <>
+          <p className="mt-3 text-sm">
+            {(payment.amount_cents / 100).toFixed(2)} {payment.currency.toUpperCase()} —{" "}
+            <span className="font-medium">{payment.status}</span>
+          </p>
+          {payment.status === "refunded" && (
+            <p className="mt-1 text-sm text-black/60 dark:text-white/60">
+              Remboursé le {payment.refunded_at ? new Date(payment.refunded_at).toLocaleString("fr-FR") : "—"}
+              {payment.refund_reason ? ` — ${payment.refund_reason}` : ""}
+            </p>
+          )}
+          {payment.status === "succeeded" && staff.role !== "operator" && <RefundForm paymentId={payment.id} />}
+        </>
+      ) : (
+        <p className="mt-3 text-sm text-black/60 dark:text-white/60">Pas encore de paiement.</p>
       )}
     </div>
   );

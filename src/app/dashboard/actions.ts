@@ -3,7 +3,7 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import QRCode from "qrcode";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
@@ -13,32 +13,37 @@ import { generateScanToken, hashScanToken } from "@/lib/crypto/qr-token";
 import { runPassportUploadSequence } from "./passport-upload-sequence";
 import { parseQuestionnaireSchema, type QuestionnaireQuestion } from "@/lib/questionnaire/types";
 import { MANDATE_TEXT, MANDATE_VERSION } from "@/lib/mandate/content";
+import { computeLineAmounts, type Pricing } from "@/lib/pricing";
+import { getStripeClient, isStripeConfigured } from "@/lib/stripe/client";
+import { sendTransactionalEmail } from "@/lib/email/brevo-client";
 
 // app_settings n'a aucune policy de lecture pour un client authentifié
 // (cf. db/schema.sql, section RLS) : ces valeurs sont lues côté serveur via
 // service_role, jamais exposées en direct au front (docs section 9).
-async function getEstaPriceCents(): Promise<number> {
+async function getAppSettingNumber(key: string): Promise<number> {
   const service = createServiceClient();
-  const { data, error } = await service
-    .from("app_settings")
-    .select("value")
-    .eq("key", "esta_price_cents")
-    .single();
+  const { data, error } = await service.from("app_settings").select("value").eq("key", key).single();
 
-  if (error || !data) throw new Error("Impossible de lire le prix ESTA (app_settings)");
+  if (error || !data) throw new Error(`Impossible de lire "${key}" (app_settings)`);
   return Number(data.value);
 }
 
-async function getQrSessionTtlMinutes(): Promise<number> {
-  const service = createServiceClient();
-  const { data, error } = await service
-    .from("app_settings")
-    .select("value")
-    .eq("key", "qr_session_ttl_minutes")
-    .single();
+async function getEstaPriceCents(): Promise<number> {
+  return getAppSettingNumber("esta_price_cents");
+}
 
-  if (error || !data) throw new Error("Impossible de lire la durée de validité du QR (app_settings)");
-  return Number(data.value);
+async function getQrSessionTtlMinutes(): Promise<number> {
+  return getAppSettingNumber("qr_session_ttl_minutes");
+}
+
+export async function getPricing(): Promise<Pricing> {
+  const [serviceFeeCents, officialFeeUsdCents, eurXpfRate, usdEurRate] = await Promise.all([
+    getAppSettingNumber("esta_price_cents"),
+    getAppSettingNumber("esta_official_fee_usd_cents"),
+    getAppSettingNumber("eur_xpf_fixed_rate"),
+    getAppSettingNumber("usd_eur_fx_rate"),
+  ]);
+  return { serviceFeeCents, officialFeeUsdCents, eurXpfRate, usdEurRate };
 }
 
 export async function createTravelRequest() {
@@ -88,6 +93,22 @@ export async function createTravelRequest() {
     actor_id: customer.id,
     message: "Dossier créé",
   });
+
+  if (user.email) {
+    const { success } = await sendTransactionalEmail({
+      to: user.email,
+      subject: "Votre dossier ESTA FenuaSIM a bien été créé",
+      htmlContent: `<p>Bonjour,</p><p>Votre dossier de demande d'autorisation ESTA a bien été créé. Vous pouvez le retrouver à tout moment depuis votre espace client.</p>`,
+    });
+    if (success) {
+      await supabase.from("timeline").insert({
+        travel_request_id: travelRequest.id,
+        event_type: "email_sent",
+        actor_type: "system",
+        message: "Email de confirmation de création du dossier envoyé",
+      });
+    }
+  }
 
   redirect(`/dashboard/${travelRequest.id}`);
 }
@@ -491,6 +512,127 @@ export async function submitMandate(travelerId: string, formData: FormData) {
   }
 
   revalidatePath(`/dashboard/${traveler.travel_request_id}`);
+}
+
+export async function createCheckoutSession(travelRequestId: string, currency: "eur" | "xpf") {
+  if (!isStripeConfigured()) {
+    throw new Error("Le paiement en ligne n'est pas encore disponible.");
+  }
+
+  const supabase = await createClient();
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/connexion");
+
+  const { data: customer } = await supabase
+    .from("customers")
+    .select("id")
+    .eq("auth_user_id", user.id)
+    .single();
+  if (!customer) redirect("/connexion");
+
+  // travel_requests_select (owns_travel_request) garantit que cette ligne
+  // n'est retournée que si le dossier appartient au client courant.
+  const { data: travelRequest } = await supabase
+    .from("travel_requests")
+    .select("id, status")
+    .eq("id", travelRequestId)
+    .single();
+  if (!travelRequest || travelRequest.status !== "payment_pending") {
+    throw new Error("Cette étape n'est plus disponible pour ce dossier.");
+  }
+
+  // Ne fait jamais confiance à l'écran atteint côté client : un dossier ne
+  // peut être payé que si un mandat a bien été signé au préalable.
+  const { data: mandate } = await supabase
+    .from("mandates")
+    .select("id")
+    .eq("travel_request_id", travelRequestId)
+    .is("deleted_at", null)
+    .maybeSingle();
+  if (!mandate) throw new Error("Le mandat électronique doit être signé avant le paiement.");
+
+  const pricing = await getPricing();
+  const { serviceFeeAmount, officialFeeAmount, amountTotal } = computeLineAmounts(currency, pricing);
+  const idempotencyKey = randomUUID();
+
+  // payments n'a aucune policy d'insert pour authenticated (cf. db/schema.sql :
+  // écriture exclusivement service_role, côté webhook/actions serveur) —
+  // même justification que getAppSettingNumber ci-dessus.
+  const service = createServiceClient();
+  const { data: payment, error: paymentError } = await service
+    .from("payments")
+    .insert({
+      travel_request_id: travelRequestId,
+      currency,
+      amount_cents: amountTotal,
+      service_fee_amount: serviceFeeAmount,
+      official_fee_amount: officialFeeAmount,
+      official_fee_amount_usd_cents: pricing.officialFeeUsdCents,
+      fx_rate_eur_xpf: currency === "xpf" ? pricing.eurXpfRate : null,
+      fx_rate_usd_eur: pricing.usdEurRate,
+      idempotency_key: idempotencyKey,
+      status: "pending",
+    })
+    .select("id")
+    .single();
+  if (paymentError || !payment) throw new Error("Impossible de préparer le paiement");
+
+  const stripe = getStripeClient();
+  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL;
+
+  let session;
+  try {
+    session = await stripe.checkout.sessions.create(
+      {
+        mode: "payment",
+        currency,
+        customer_email: user.email,
+        line_items: [
+          {
+            price_data: {
+              currency,
+              product_data: { name: "Frais de service FenuaSIM — ESTA" },
+              unit_amount: serviceFeeAmount,
+            },
+            quantity: 1,
+          },
+          {
+            price_data: {
+              currency,
+              product_data: { name: "Frais officiels ESTA (gouvernement américain)" },
+              unit_amount: officialFeeAmount,
+            },
+            quantity: 1,
+          },
+        ],
+        success_url: `${baseUrl}/dashboard/${travelRequestId}?payment=success`,
+        cancel_url: `${baseUrl}/dashboard/${travelRequestId}?payment=cancelled`,
+        metadata: { travel_request_id: travelRequestId, payment_id: payment.id },
+        expand: ["payment_intent"],
+      },
+      { idempotencyKey },
+    );
+  } catch (error) {
+    console.error("Stripe: création de la session de paiement en échec", error);
+    throw new Error("Le paiement n'a pas pu être initié. Réessayez.");
+  }
+
+  const paymentIntentId =
+    typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id;
+
+  await service
+    .from("payments")
+    .update({
+      stripe_payment_intent_id: paymentIntentId ?? null,
+      stripe_customer_id: typeof session.customer === "string" ? session.customer : null,
+    })
+    .eq("id", payment.id);
+
+  if (!session.url) throw new Error("Le paiement n'a pas pu être initié. Réessayez.");
+  redirect(session.url);
 }
 
 export async function getPassportPreviewUrl(documentId: string): Promise<string | null> {

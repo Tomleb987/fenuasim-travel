@@ -2,22 +2,28 @@ import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { TRAVEL_REQUEST_STATUS_LABELS } from "@/lib/status";
-import { getPassportPreviewUrl } from "../actions";
+import { getPassportPreviewUrl, getPricing } from "../actions";
 import { PassportUploadForm } from "./passport-upload-form";
 import { TravelerDetailsForm } from "./traveler-details-form";
 import { QuestionnaireForm } from "./questionnaire-form";
 import { MandateForm } from "./mandate-form";
+import { PaymentForm } from "./payment-form";
+import { PaymentPendingRefresher } from "./payment-pending-refresher";
 import { QrScanPanel } from "./qr-scan-panel";
 import { decryptPassportField } from "@/lib/crypto/passport-encryption";
 import { pgHexToBytes } from "@/lib/postgres-bytea";
 import { parseQuestionnaireSchema } from "@/lib/questionnaire/types";
+import { isStripeConfigured } from "@/lib/stripe/client";
 
 export default async function TravelRequestPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ payment?: string }>;
 }) {
   const { id } = await params;
+  const { payment: paymentQueryParam } = await searchParams;
   const supabase = await createClient();
 
   const {
@@ -128,6 +134,10 @@ export default async function TravelRequestPage({
         .maybeSingle()
     : { data: null };
 
+  const stripeConfigured = isStripeConfigured();
+  const pricing =
+    travelRequest.status === "payment_pending" && stripeConfigured ? await getPricing() : null;
+
   return (
     <div className="mx-auto max-w-2xl px-4 py-16">
       <Link href="/dashboard" className="text-sm text-black/60 hover:underline dark:text-white/60">
@@ -195,11 +205,33 @@ export default async function TravelRequestPage({
           />
         )}
 
-      {travelRequest.status !== "draft" && travelRequest.status !== "to_verify" && (
+      {travelRequest.status === "payment_pending" && pricing && (
+        <>
+          <PaymentForm travelRequestId={travelRequest.id} pricing={pricing} />
+          {paymentQueryParam === "success" && <PaymentPendingRefresher />}
+        </>
+      )}
+
+      {travelRequest.status === "payment_pending" && !pricing && (
         <p className="mt-6 text-sm text-black/60 dark:text-white/60">
-          La suite du parcours (paiement) arrive dans une prochaine étape.
+          Le paiement en ligne n&apos;est pas encore disponible. Merci de réessayer plus tard ou de
+          contacter le support.
         </p>
       )}
+
+      {travelRequest.status === "payment_pending" && paymentQueryParam === "cancelled" && (
+        <p className="mt-3 text-sm text-black/60 dark:text-white/60">
+          Paiement annulé, vous pouvez réessayer ci-dessus.
+        </p>
+      )}
+
+      {travelRequest.status !== "draft" &&
+        travelRequest.status !== "to_verify" &&
+        travelRequest.status !== "payment_pending" && (
+          <p className="mt-6 text-sm text-black/60 dark:text-white/60">
+            La suite du parcours arrive dans une prochaine étape.
+          </p>
+        )}
 
       <h2 className="mt-10 text-sm font-semibold uppercase tracking-wider text-black/60 dark:text-white/60">
         Historique
