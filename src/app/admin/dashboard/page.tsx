@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { getStaffMember } from "@/lib/admin/require-staff";
 import { TRAVEL_REQUEST_STATUS_LABELS } from "@/lib/status";
@@ -16,10 +17,20 @@ export default async function AdminDashboardPage() {
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-16">
-      <h1 className="text-2xl font-semibold tracking-tight">Dossiers ESTA</h1>
-      <p className="mt-1 text-sm text-black/60 dark:text-white/60">
-        Connecté en tant que staff ({staff.role})
-      </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Dossiers ESTA</h1>
+          <p className="mt-1 text-sm text-black/60 dark:text-white/60">
+            Connecté en tant que staff ({staff.role})
+          </p>
+        </div>
+        <Link
+          href="/admin/dashboard/questionnaire"
+          className="text-sm text-fenua-violet hover:underline"
+        >
+          Questionnaire ESTA →
+        </Link>
+      </div>
 
       <div className="mt-8 overflow-x-auto">
         <table className="w-full text-left text-sm">
@@ -34,7 +45,11 @@ export default async function AdminDashboardPage() {
           <tbody className="divide-y divide-black/10 dark:divide-white/10">
             {(travelRequests ?? []).map((tr) => (
               <tr key={tr.id}>
-                <td className="py-3 pr-4">{tr.customers?.email ?? "—"}</td>
+                <td className="py-3 pr-4">
+                  <Link href={`/admin/dashboard/${tr.id}`} className="hover:underline">
+                    {tr.customers?.email ?? "—"}
+                  </Link>
+                </td>
                 <td className="py-3 pr-4">
                   {TRAVEL_REQUEST_STATUS_LABELS[tr.status] ?? tr.status}
                 </td>

@@ -661,3 +661,49 @@ create policy app_settings_select on app_settings for select
 create policy app_settings_write on app_settings for all
   using (private.is_admin_or_above())
   with check (private.is_admin_or_above());
+
+-- ----------------------------------------------------------------------------
+-- Fonction — activate_questionnaire_version (Sprint 3)
+--
+-- Vit dans `public` (et non `private`) car appelée en RPC depuis le serveur
+-- applicatif (supabase.rpc(...)) : seul le schéma exposé par PostgREST est
+-- atteignable ainsi, contrairement à `private`. `security invoker` : aucune
+-- nouvelle surface de privilège, l'appelant reste entièrement soumis à la RLS
+-- existante (questionnaires_write / private.is_admin_or_above()) — cette
+-- fonction ne fait qu'atomiser deux updates qui, exécutés séquentiellement
+-- depuis Next.js, risqueraient une situation de course entre deux admins
+-- activant des versions différentes en même temps.
+-- ----------------------------------------------------------------------------
+create or replace function activate_questionnaire_version(p_questionnaire_id uuid)
+returns void
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  v_destination destination_code;
+begin
+  select destination_code into v_destination
+  from questionnaires
+  where id = p_questionnaire_id and deleted_at is null;
+
+  if v_destination is null then
+    raise exception 'Questionnaire introuvable';
+  end if;
+
+  -- verrouille les lignes actives de cette destination pour sérialiser les
+  -- activations concurrentes (un 2e appel attend le commit du 1er)
+  perform 1 from questionnaires
+  where destination_code = v_destination and is_active = true and deleted_at is null
+  for update;
+
+  update questionnaires set is_active = false
+  where destination_code = v_destination and is_active = true
+    and id <> p_questionnaire_id and deleted_at is null;
+
+  update questionnaires set is_active = true where id = p_questionnaire_id;
+end;
+$$;
+
+revoke all on function activate_questionnaire_version(uuid) from public;
+grant execute on function activate_questionnaire_version(uuid) to authenticated;

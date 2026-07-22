@@ -677,7 +677,10 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      activate_questionnaire_version: {
+        Args: { p_questionnaire_id: string }
+        Returns: undefined
+      }
     }
     Enums: {
       actor_type: "customer" | "admin" | "system"

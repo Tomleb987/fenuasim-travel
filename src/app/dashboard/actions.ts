@@ -9,6 +9,7 @@ import { encryptPassportField } from "@/lib/crypto/passport-encryption";
 import { bytesToPgHex } from "@/lib/postgres-bytea";
 import { generateScanToken, hashScanToken } from "@/lib/crypto/qr-token";
 import { runPassportUploadSequence } from "./passport-upload-sequence";
+import { parseQuestionnaireSchema, type QuestionnaireQuestion } from "@/lib/questionnaire/types";
 
 // app_settings n'a aucune policy de lecture pour un client authentifié
 // (cf. db/schema.sql, section RLS) : ces valeurs sont lues côté serveur via
@@ -248,6 +249,128 @@ export async function submitTravelerDetails(travelerId: string, formData: FormDa
     actor_type: "customer",
     actor_id: customer.id,
     message: "Informations passeport validées par le client",
+  });
+
+  revalidatePath(`/dashboard/${traveler.travel_request_id}`);
+}
+
+// Valide et normalise la valeur brute d'une réponse (FormData -> jsonb) selon
+// le type de la question. Lève si la question est obligatoire et sans réponse
+// exploitable, ou si la valeur ne correspond pas au type attendu.
+function parseAnswerValue(question: QuestionnaireQuestion, raw: FormDataEntryValue | null): string | boolean | null {
+  const value = typeof raw === "string" ? raw.trim() : "";
+
+  if (!value) {
+    if (question.required) throw new Error(`La question « ${question.label} » est obligatoire`);
+    return null;
+  }
+
+  switch (question.type) {
+    case "boolean":
+      if (value !== "true" && value !== "false") {
+        throw new Error(`Réponse invalide pour « ${question.label} »`);
+      }
+      return value === "true";
+    case "select":
+      if (!question.options?.includes(value)) {
+        throw new Error(`Réponse invalide pour « ${question.label} »`);
+      }
+      return value;
+    case "date":
+    case "text":
+      return value;
+  }
+}
+
+export async function submitQuestionnaireAnswers(
+  travelerId: string,
+  questionnaireId: string,
+  formData: FormData,
+) {
+  const supabase = await createClient();
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/connexion");
+
+  const { data: customer } = await supabase
+    .from("customers")
+    .select("id")
+    .eq("auth_user_id", user.id)
+    .single();
+  if (!customer) redirect("/connexion");
+
+  // travelers_select (owns_travel_request) garantit que cette ligne n'est
+  // retournée que si le voyageur appartient à un dossier du client courant.
+  const { data: traveler } = await supabase
+    .from("travelers")
+    .select("id, travel_request_id")
+    .eq("id", travelerId)
+    .single();
+  if (!traveler) throw new Error("Voyageur introuvable");
+
+  // On ne fait jamais confiance au questionnaireId soumis par le client comme
+  // source de vérité : si un admin a activé une nouvelle version pendant que
+  // ce client remplissait le formulaire, on le détecte ici plutôt que
+  // d'enregistrer des réponses contre une version qui n'est plus active.
+  const { data: activeQuestionnaire } = await supabase
+    .from("questionnaires")
+    .select("id, schema_json")
+    .eq("destination_code", "ESTA_US")
+    .eq("is_active", true)
+    .is("deleted_at", null)
+    .maybeSingle();
+
+  if (!activeQuestionnaire || activeQuestionnaire.id !== questionnaireId) {
+    throw new Error("Le questionnaire a été mis à jour, merci de recharger la page.");
+  }
+
+  const schema = parseQuestionnaireSchema(activeQuestionnaire.schema_json);
+
+  const parsedAnswers = schema.map((question) => ({
+    question,
+    value: parseAnswerValue(question, formData.get(question.key)),
+  }));
+
+  const { data: existingAnswers } = await supabase
+    .from("answers")
+    .select("id, question_key")
+    .eq("traveler_id", travelerId)
+    .eq("questionnaire_id", questionnaireId)
+    .is("deleted_at", null);
+
+  const existingByKey = new Map((existingAnswers ?? []).map((a) => [a.question_key, a.id]));
+
+  for (const { question, value } of parsedAnswers) {
+    if (value === null) continue; // question optionnelle laissée vide
+
+    const existingId = existingByKey.get(question.key);
+    if (existingId) {
+      const { error } = await supabase
+        .from("answers")
+        .update({ answer_value: value, question_label_snapshot: question.label })
+        .eq("id", existingId);
+      if (error) throw new Error("Enregistrement des réponses impossible");
+    } else {
+      const { error } = await supabase.from("answers").insert({
+        travel_request_id: traveler.travel_request_id,
+        traveler_id: travelerId,
+        questionnaire_id: questionnaireId,
+        question_key: question.key,
+        question_label_snapshot: question.label,
+        answer_value: value,
+      });
+      if (error) throw new Error("Enregistrement des réponses impossible");
+    }
+  }
+
+  await supabase.from("timeline").insert({
+    travel_request_id: traveler.travel_request_id,
+    event_type: "note",
+    actor_type: "customer",
+    actor_id: customer.id,
+    message: "Questionnaire ESTA complété par le client",
   });
 
   revalidatePath(`/dashboard/${traveler.travel_request_id}`);

@@ -5,9 +5,11 @@ import { TRAVEL_REQUEST_STATUS_LABELS } from "@/lib/status";
 import { getPassportPreviewUrl } from "../actions";
 import { PassportUploadForm } from "./passport-upload-form";
 import { TravelerDetailsForm } from "./traveler-details-form";
+import { QuestionnaireForm } from "./questionnaire-form";
 import { QrScanPanel } from "./qr-scan-panel";
 import { decryptPassportField } from "@/lib/crypto/passport-encryption";
 import { pgHexToBytes } from "@/lib/postgres-bytea";
+import { parseQuestionnaireSchema } from "@/lib/questionnaire/types";
 
 export default async function TravelRequestPage({
   params,
@@ -77,6 +79,45 @@ export default async function TravelRequestPage({
     .eq("travel_request_id", id)
     .order("created_at", { ascending: false });
 
+  // Chargé uniquement quand pertinent (données passeport déjà validées) :
+  // évite une requête inutile pour un dossier encore en amont du parcours.
+  let questionnaireSchema = null as ReturnType<typeof parseQuestionnaireSchema> | null;
+  let activeQuestionnaireId: string | null = null;
+  let questionnaireComplete = false;
+  let initialAnswers: Record<string, unknown> = {};
+
+  if (traveler?.data_validated_by_customer) {
+    const { data: activeQuestionnaire } = await supabase
+      .from("questionnaires")
+      .select("id, schema_json")
+      .eq("destination_code", "ESTA_US")
+      .eq("is_active", true)
+      .is("deleted_at", null)
+      .maybeSingle();
+
+    if (activeQuestionnaire) {
+      activeQuestionnaireId = activeQuestionnaire.id;
+      questionnaireSchema = parseQuestionnaireSchema(activeQuestionnaire.schema_json);
+
+      const { data: answers } = await supabase
+        .from("answers")
+        .select("question_key, answer_value")
+        .eq("traveler_id", traveler.id)
+        .eq("questionnaire_id", activeQuestionnaire.id)
+        .is("deleted_at", null);
+
+      initialAnswers = Object.fromEntries((answers ?? []).map((a) => [a.question_key, a.answer_value]));
+
+      // Complétion dérivée, pas stockée : aucune colonne ne trace "questionnaire
+      // terminé" — on compare les clés obligatoires du schéma aux réponses déjà
+      // enregistrées, cohérent avec la même logique côté serveur (submitQuestionnaireAnswers).
+      const answeredKeys = new Set(Object.keys(initialAnswers));
+      questionnaireComplete = questionnaireSchema
+        .filter((q) => q.required)
+        .every((q) => answeredKeys.has(q.key));
+    }
+  }
+
   return (
     <div className="mx-auto max-w-2xl px-4 py-16">
       <Link href="/dashboard" className="text-sm text-black/60 hover:underline dark:text-white/60">
@@ -112,16 +153,38 @@ export default async function TravelRequestPage({
         </>
       )}
 
-      {travelRequest.status === "to_verify" && traveler?.data_validated_by_customer && (
+      {travelRequest.status === "to_verify" &&
+        traveler?.data_validated_by_customer &&
+        questionnaireSchema &&
+        activeQuestionnaireId &&
+        !questionnaireComplete && (
+          <QuestionnaireForm
+            travelerId={traveler.id}
+            questionnaireId={activeQuestionnaireId}
+            schema={questionnaireSchema}
+            initialAnswers={initialAnswers}
+          />
+        )}
+
+      {travelRequest.status === "to_verify" &&
+        traveler?.data_validated_by_customer &&
+        !questionnaireSchema && (
+          <p className="mt-6 text-sm text-black/60 dark:text-white/60">
+            Le questionnaire d&apos;éligibilité n&apos;est pas disponible pour le moment. Merci de
+            réessayer plus tard ou de contacter le support.
+          </p>
+        )}
+
+      {travelRequest.status === "to_verify" && traveler?.data_validated_by_customer && questionnaireComplete && (
         <p className="mt-6 text-sm text-black/60 dark:text-white/60">
-          Informations enregistrées. La suite du parcours (questionnaire, paiement) arrive au
-          Sprint 3.
+          Réponses enregistrées. La suite du parcours (mandat électronique, paiement) arrive
+          prochainement.
         </p>
       )}
 
       {travelRequest.status !== "draft" && travelRequest.status !== "to_verify" && (
         <p className="mt-6 text-sm text-black/60 dark:text-white/60">
-          La suite du parcours (questionnaire, paiement) arrive au Sprint 3.
+          La suite du parcours (paiement) arrive dans une prochaine étape.
         </p>
       )}
 
