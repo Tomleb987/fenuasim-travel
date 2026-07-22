@@ -617,6 +617,15 @@ create policy mandates_select on mandates for select
 create policy mandates_insert on mandates for insert
   with check (private.owns_travel_request(travel_request_id));
 
+-- un seul mandat signé par dossier (Sprint 4)
+create unique index mandates_one_per_request_idx on mandates (travel_request_id)
+  where deleted_at is null;
+
+-- immuable : révoqué explicitement pour tous les rôles (même traitement que
+-- `timeline`, cf. ci-dessous), pas seulement laissé au défaut RLS
+revoke update, delete on mandates from public, anon, authenticated, service_role;
+grant select, insert on mandates to authenticated, service_role;
+
 -- ----------------------------------------------------------------------------
 -- Policies — timeline (lecture client + staff, écriture insert seulement,
 -- jamais d'update/delete — cf. revoke explicite ci-dessous)

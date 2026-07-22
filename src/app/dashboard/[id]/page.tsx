@@ -6,6 +6,7 @@ import { getPassportPreviewUrl } from "../actions";
 import { PassportUploadForm } from "./passport-upload-form";
 import { TravelerDetailsForm } from "./traveler-details-form";
 import { QuestionnaireForm } from "./questionnaire-form";
+import { MandateForm } from "./mandate-form";
 import { QrScanPanel } from "./qr-scan-panel";
 import { decryptPassportField } from "@/lib/crypto/passport-encryption";
 import { pgHexToBytes } from "@/lib/postgres-bytea";
@@ -118,6 +119,15 @@ export default async function TravelRequestPage({
     }
   }
 
+  const { data: mandate } = traveler
+    ? await supabase
+        .from("mandates")
+        .select("id")
+        .eq("travel_request_id", id)
+        .is("deleted_at", null)
+        .maybeSingle()
+    : { data: null };
+
   return (
     <div className="mx-auto max-w-2xl px-4 py-16">
       <Link href="/dashboard" className="text-sm text-black/60 hover:underline dark:text-white/60">
@@ -175,12 +185,15 @@ export default async function TravelRequestPage({
           </p>
         )}
 
-      {travelRequest.status === "to_verify" && traveler?.data_validated_by_customer && questionnaireComplete && (
-        <p className="mt-6 text-sm text-black/60 dark:text-white/60">
-          Réponses enregistrées. La suite du parcours (mandat électronique, paiement) arrive
-          prochainement.
-        </p>
-      )}
+      {travelRequest.status === "to_verify" &&
+        traveler?.data_validated_by_customer &&
+        questionnaireComplete &&
+        !mandate && (
+          <MandateForm
+            travelerId={traveler.id}
+            suggestedSignerName={`${traveler.first_name ?? ""} ${traveler.last_name ?? ""}`.trim()}
+          />
+        )}
 
       {travelRequest.status !== "draft" && travelRequest.status !== "to_verify" && (
         <p className="mt-6 text-sm text-black/60 dark:text-white/60">

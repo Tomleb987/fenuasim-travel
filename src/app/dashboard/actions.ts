@@ -2,6 +2,8 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import { headers } from "next/headers";
+import { createHash } from "node:crypto";
 import QRCode from "qrcode";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/service";
@@ -10,6 +12,7 @@ import { bytesToPgHex } from "@/lib/postgres-bytea";
 import { generateScanToken, hashScanToken } from "@/lib/crypto/qr-token";
 import { runPassportUploadSequence } from "./passport-upload-sequence";
 import { parseQuestionnaireSchema, type QuestionnaireQuestion } from "@/lib/questionnaire/types";
+import { MANDATE_TEXT, MANDATE_VERSION } from "@/lib/mandate/content";
 
 // app_settings n'a aucune policy de lecture pour un client authentifié
 // (cf. db/schema.sql, section RLS) : ces valeurs sont lues côté serveur via
@@ -372,6 +375,120 @@ export async function submitQuestionnaireAnswers(
     actor_id: customer.id,
     message: "Questionnaire ESTA complété par le client",
   });
+
+  revalidatePath(`/dashboard/${traveler.travel_request_id}`);
+}
+
+export async function submitMandate(travelerId: string, formData: FormData) {
+  const supabase = await createClient();
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/connexion");
+
+  const { data: customer } = await supabase
+    .from("customers")
+    .select("id")
+    .eq("auth_user_id", user.id)
+    .single();
+  if (!customer) redirect("/connexion");
+
+  // travelers_select (owns_travel_request) garantit que cette ligne n'est
+  // retournée que si le voyageur appartient à un dossier du client courant.
+  const { data: traveler } = await supabase
+    .from("travelers")
+    .select("id, travel_request_id")
+    .eq("id", travelerId)
+    .single();
+  if (!traveler) throw new Error("Voyageur introuvable");
+
+  const { data: travelRequest } = await supabase
+    .from("travel_requests")
+    .select("id, status")
+    .eq("id", traveler.travel_request_id)
+    .single();
+  if (!travelRequest || travelRequest.status !== "to_verify") {
+    throw new Error("Cette étape n'est plus disponible pour ce dossier.");
+  }
+
+  // Ne fait jamais confiance à l'écran atteint côté client : revalide que le
+  // questionnaire actif est entièrement répondu avant d'accepter la signature,
+  // même logique de complétion dérivée que dans page.tsx / submitQuestionnaireAnswers.
+  const { data: activeQuestionnaire } = await supabase
+    .from("questionnaires")
+    .select("id, schema_json")
+    .eq("destination_code", "ESTA_US")
+    .eq("is_active", true)
+    .is("deleted_at", null)
+    .maybeSingle();
+  if (!activeQuestionnaire) throw new Error("Questionnaire introuvable");
+
+  const schema = parseQuestionnaireSchema(activeQuestionnaire.schema_json);
+  const { data: answers } = await supabase
+    .from("answers")
+    .select("question_key")
+    .eq("traveler_id", travelerId)
+    .eq("questionnaire_id", activeQuestionnaire.id)
+    .is("deleted_at", null);
+  const answeredKeys = new Set((answers ?? []).map((a) => a.question_key));
+  const questionnaireComplete = schema.filter((q) => q.required).every((q) => answeredKeys.has(q.key));
+  if (!questionnaireComplete) {
+    throw new Error("Merci de répondre au questionnaire avant de signer le mandat.");
+  }
+
+  const signerFullName = String(formData.get("signer_full_name") ?? "").trim();
+  if (!signerFullName) throw new Error("Le nom complet est requis pour signer");
+  if (formData.get("consent") !== "on") {
+    throw new Error("Merci de cocher la case d'acceptation du mandat");
+  }
+
+  const requestHeaders = await headers();
+  const ipAddress = requestHeaders.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
+  const userAgent = requestHeaders.get("user-agent");
+
+  const acceptedAt = new Date().toISOString();
+  const proofHash = createHash("sha256")
+    .update(`${MANDATE_VERSION}|${MANDATE_TEXT}|${traveler.travel_request_id}|${signerFullName}|${acceptedAt}`)
+    .digest("hex");
+
+  const { error: mandateError } = await supabase.from("mandates").insert({
+    travel_request_id: traveler.travel_request_id,
+    customer_id: customer.id,
+    version: MANDATE_VERSION,
+    content_snapshot: MANDATE_TEXT,
+    signer_full_name: signerFullName,
+    ip_address: ipAddress,
+    user_agent: userAgent,
+    accepted_at: acceptedAt,
+    proof_hash: proofHash,
+  });
+
+  if (mandateError) {
+    // 23505 = violation de mandates_one_per_request_idx : un mandat existe déjà
+    // pour ce dossier (double-clic / soumission concurrente) — traité comme
+    // déjà signé plutôt qu'en erreur.
+    if (mandateError.code !== "23505") {
+      throw new Error("Signature du mandat impossible");
+    }
+  } else {
+    const { error: statusError } = await supabase
+      .from("travel_requests")
+      .update({ status: "payment_pending" })
+      .eq("id", traveler.travel_request_id)
+      .eq("status", "to_verify");
+    if (statusError) throw new Error("Mise à jour du dossier impossible");
+
+    await supabase.from("timeline").insert({
+      travel_request_id: traveler.travel_request_id,
+      event_type: "mandate_signed",
+      from_status: "to_verify",
+      to_status: "payment_pending",
+      actor_type: "customer",
+      actor_id: customer.id,
+      message: `Mandat électronique signé par ${signerFullName}`,
+    });
+  }
 
   revalidatePath(`/dashboard/${traveler.travel_request_id}`);
 }

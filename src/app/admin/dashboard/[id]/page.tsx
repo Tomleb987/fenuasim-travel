@@ -35,6 +35,15 @@ export default async function AdminTravelRequestPage({ params }: { params: Promi
         .order("created_at", { ascending: true })
     : { data: null };
 
+  const { data: mandate } = traveler
+    ? await supabase
+        .from("mandates")
+        .select("signer_full_name, version, accepted_at, ip_address")
+        .eq("travel_request_id", id)
+        .is("deleted_at", null)
+        .maybeSingle()
+    : { data: null };
+
   return (
     <div className="mx-auto max-w-2xl px-4 py-16">
       <Link href="/admin/dashboard" className="text-sm text-black/60 hover:underline dark:text-white/60">
@@ -94,6 +103,34 @@ export default async function AdminTravelRequestPage({ params }: { params: Promi
             </tbody>
           </table>
         </div>
+      )}
+
+      <h2 className="mt-10 text-sm font-semibold uppercase tracking-wider text-black/60 dark:text-white/60">
+        Mandat électronique
+      </h2>
+      {mandate ? (
+        <dl className="mt-3 space-y-1 text-sm">
+          <div>
+            <dt className="inline text-black/60 dark:text-white/60">Signataire : </dt>
+            <dd className="inline">{mandate.signer_full_name}</dd>
+          </div>
+          <div>
+            <dt className="inline text-black/60 dark:text-white/60">Signé le : </dt>
+            <dd className="inline">{new Date(mandate.accepted_at).toLocaleString("fr-FR")}</dd>
+          </div>
+          <div>
+            <dt className="inline text-black/60 dark:text-white/60">Version : </dt>
+            <dd className="inline">{mandate.version}</dd>
+          </div>
+          {mandate.ip_address != null && (
+            <div>
+              <dt className="inline text-black/60 dark:text-white/60">Adresse IP : </dt>
+              <dd className="inline">{String(mandate.ip_address)}</dd>
+            </div>
+          )}
+        </dl>
+      ) : (
+        <p className="mt-3 text-sm text-black/60 dark:text-white/60">Pas encore signé.</p>
       )}
     </div>
   );
